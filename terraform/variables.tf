@@ -73,3 +73,9 @@ variable "ghcr_token" {
   type        = string
   sensitive   = true
 }
+
+variable "ghcr_username" {
+  description = "GitHub username associated with the PAT used to read packages from GHCR."
+  type        = string
+  default     = "arieluchka-lectures"
+}

@@ -169,10 +169,11 @@ resource "aws_instance" "staging" {
   # We use templatefile() to inject our Terraform variables into the bash script.
   # This is how we pass the Docker image name, GHCR token, etc. to the instance.
   user_data = templatefile("${path.module}/user_data_staging.sh", {
-    ghcr_token   = var.ghcr_token
-    docker_image = var.docker_image
-    app_version  = var.app_version
-    build_sha    = var.app_version  # Using app_version as build SHA reference
+    ghcr_token    = var.ghcr_token
+    ghcr_username = var.ghcr_username
+    docker_image  = var.docker_image
+    app_version   = var.app_version
+    build_sha     = var.app_version  # Using app_version as build SHA reference
   })
 
   # Ensure a public IP is assigned so we can access the app from the internet
@@ -208,10 +209,11 @@ resource "aws_instance" "production" {
   # Same pattern as staging, but uses the production user_data script
   # which sets ENVIRONMENT=production in the container.
   user_data = templatefile("${path.module}/user_data_production.sh", {
-    ghcr_token   = var.ghcr_token
-    docker_image = var.docker_image
-    app_version  = var.app_version
-    build_sha    = var.app_version  # Using app_version as build SHA reference
+    ghcr_token    = var.ghcr_token
+    ghcr_username = var.ghcr_username
+    docker_image  = var.docker_image
+    app_version   = var.app_version
+    build_sha     = var.app_version  # Using app_version as build SHA reference
   })
 
   # Ensure a public IP is assigned so we can access the app from the internet

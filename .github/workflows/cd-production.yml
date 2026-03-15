@@ -197,7 +197,6 @@ jobs:
     # If required reviewers are set, the workflow pauses here.
     environment:
       name: production
-      url: http://${{ secrets.PRODUCTION_HOST }}:5000
 
     steps:
       # ────────────────────────────────────────────────────────

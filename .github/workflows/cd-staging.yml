@@ -215,7 +215,6 @@ jobs:
     # but we still use an environment for tracking and secrets.
     environment:
       name: staging
-      url: http://${{ secrets.STAGING_HOST }}:5000
 
     steps:
       # ────────────────────────────────────────────────────────

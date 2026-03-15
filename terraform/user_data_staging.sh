@@ -27,6 +27,7 @@ yum install -y docker
 # Start Docker and enable it to start on boot
 systemctl start docker
 systemctl enable docker
+usermod -aG docker ec2-user
 
 # Verify Docker is running
 docker --version
@@ -38,36 +39,42 @@ echo ">>> Docker installed and running."
 # GHCR requires authentication even for pulling private images.
 # The token is passed from Terraform via the templatefile() function.
 echo ">>> Logging in to GHCR..."
-echo "${ghcr_token}" | docker login ghcr.io -u USERNAME --password-stdin
-echo ">>> GHCR login successful."
+if echo "${ghcr_token}" | docker login ghcr.io -u "${ghcr_username}" --password-stdin; then
+  echo ">>> GHCR login successful."
+else
+  echo ">>> WARNING: GHCR login failed. Docker is installed; a later GitHub Actions deployment can still complete setup."
+fi
 
 # -----------------------------------------------------------------------------
 # Step 3: Pull the Docker image
 # -----------------------------------------------------------------------------
 echo ">>> Pulling image: ${docker_image}:${app_version}"
-docker pull ${docker_image}:${app_version}
-echo ">>> Image pulled successfully."
+if docker pull ${docker_image}:${app_version}; then
+  echo ">>> Image pulled successfully."
 
-# -----------------------------------------------------------------------------
-# Step 4: Run the Flask application container
-# -----------------------------------------------------------------------------
-# Flags explained:
-#   -d                        Run in background (detached mode)
-#   --name cicd-demo          Give the container a friendly name
-#   --restart unless-stopped  Auto-restart on crash or reboot (unless manually stopped)
-#   -p 5000:5000              Map host port 5000 to container port 5000
-#   -e APP_VERSION            Tell the app which version it is (shown on /health)
-#   -e ENVIRONMENT=staging    Tell the app it's running in staging
-#   -e BUILD_SHA              Git commit SHA for traceability
-echo ">>> Starting container..."
-docker run -d \
-  --name cicd-demo \
-  --restart unless-stopped \
-  -p 5000:5000 \
-  -e APP_VERSION=${app_version} \
-  -e ENVIRONMENT=staging \
-  -e BUILD_SHA=${build_sha} \
-  ${docker_image}:${app_version}
+  # ---------------------------------------------------------------------------
+  # Step 4: Run the Flask application container
+  # ---------------------------------------------------------------------------
+  # Flags explained:
+  #   -d                        Run in background (detached mode)
+  #   --name cicd-demo          Give the container a friendly name
+  #   --restart unless-stopped  Auto-restart on crash or reboot (unless manually stopped)
+  #   -p 5000:5000              Map host port 5000 to container port 5000
+  #   -e APP_VERSION            Tell the app which version it is (shown on /health)
+  #   -e ENVIRONMENT=staging    Tell the app it's running in staging
+  #   -e BUILD_SHA              Git commit SHA for traceability
+  echo ">>> Starting container..."
+  docker run -d \
+    --name cicd-demo \
+    --restart unless-stopped \
+    -p 5000:5000 \
+    -e APP_VERSION=${app_version} \
+    -e ENVIRONMENT=staging \
+    -e BUILD_SHA=${build_sha} \
+    ${docker_image}:${app_version}
 
-echo ">>> Container started successfully."
+  echo ">>> Container started successfully."
+else
+  echo ">>> WARNING: Initial image ${docker_image}:${app_version} is not available yet. The instance is ready for the deployment workflow to finish setup later."
+fi
 echo "=== User data script completed at $(date) ==="

@@ -4,6 +4,8 @@ A complete CI/CD pipeline demonstration using GitHub Actions, Docker, and AWS.
 This showcase simulates a real-world software delivery workflow -- from feature
 development on a branch all the way through production deployment and rollback.
 
+Presentation note: the repository is configured with live staging and production demo environments.
+
 ---
 
 ## Architecture

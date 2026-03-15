@@ -1,0 +1,345 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  Scheduled Health Checks — Automated Monitoring                             ║
+# ║                                                                             ║
+# ║  WHAT:  This workflow periodically checks the health of both staging        ║
+# ║         and production environments by hitting their health endpoints.      ║
+# ║         If any check fails, it automatically creates a GitHub Issue         ║
+# ║         to alert the team.                                                  ║
+# ║                                                                             ║
+# ║  WHEN:  Runs automatically every 6 hours (via cron schedule) AND can       ║
+# ║         be triggered manually via the "Run workflow" button.                ║
+# ║                                                                             ║
+# ║  WHY:   Deployments can succeed but the app might crash later due to       ║
+# ║         memory leaks, database issues, expired certificates, etc.          ║
+# ║         Scheduled health checks catch these "silent failures" that         ║
+# ║         happen between deployments.                                         ║
+# ║                                                                             ║
+# ║  WHAT STUDENTS SHOULD OBSERVE:                                              ║
+# ║    1. The workflow runs every 6 hours automatically (check the runs tab)   ║
+# ║    2. You can also trigger it manually to test it                          ║
+# ║    3. If a health check fails, a GitHub Issue is created automatically     ║
+# ║    4. The issue includes diagnostic information to help debugging          ║
+# ║    5. Issues are labeled for easy filtering                                ║
+# ║                                                                             ║
+# ║  TEACHING NOTE: This is a basic form of "synthetic monitoring."            ║
+# ║  In real production systems, you'd use tools like:                         ║
+# ║    - Datadog, New Relic, Prometheus (full monitoring)                       ║
+# ║    - PagerDuty, OpsGenie (alerting & on-call)                              ║
+# ║    - UptimeRobot, Pingdom (uptime monitoring)                              ║
+# ║  But GitHub Actions cron jobs work well for simple health checks!          ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: Scheduled Health Checks
+
+# ──────────────────────────────────────────────────────────────
+# TRIGGERS: Scheduled (cron) + Manual (workflow_dispatch)
+# ──────────────────────────────────────────────────────────────
+on:
+  # TRIGGER 1: Cron schedule — runs every 6 hours
+  # The cron syntax is: minute hour day-of-month month day-of-week
+  #
+  #   ┌───────────── minute (0-59)
+  #   │ ┌─────────── hour (0-23)
+  #   │ │ ┌───────── day of month (1-31)
+  #   │ │ │ ┌─────── month (1-12)
+  #   │ │ │ │ ┌───── day of week (0-6, Sunday=0)
+  #   │ │ │ │ │
+  #   0 */6 * * *    = "At minute 0, every 6th hour"
+  #
+  # This means: 00:00, 06:00, 12:00, 18:00 UTC every day
+  #
+  # TEACHING NOTE: Cron schedules in GitHub Actions:
+  #   - Always use UTC timezone
+  #   - Minimum interval is 5 minutes (but GitHub may delay)
+  #   - Schedules may be delayed during high Actions load
+  #   - Scheduled workflows only run on the default branch (main)
+  schedule:
+    - cron: '0 */6 * * *'
+
+  # TRIGGER 2: Manual dispatch — for on-demand health checks
+  # This is useful for:
+  #   - Verifying after a deployment
+  #   - Checking during an incident investigation
+  #   - Testing the health check workflow itself
+  workflow_dispatch:
+    # No inputs needed — we always check both environments
+
+# ──────────────────────────────────────────────────────────────
+# PERMISSIONS
+# ──────────────────────────────────────────────────────────────
+permissions:
+  contents: read      # Read repo
+  issues: write       # Create issues when health checks fail
+
+jobs:
+  # ════════════════════════════════════════════════════════════
+  # JOB 1: CHECK STAGING — Health Check for Staging Environment
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Verify that the staging environment is healthy.
+  # We check the health endpoint and capture the response.
+  #
+  # TEACHING NOTE: We use `continue-on-error: true` on the curl
+  # step so that the job doesn't fail immediately. Instead, we
+  # capture the result and report it in the downstream `report` job.
+  # This way, a staging failure doesn't prevent us from also
+  # checking production.
+  check-staging:
+    name: Check Staging Health
+    runs-on: ubuntu-latest
+    # Outputs let us pass results to the report job
+    outputs:
+      status: ${{ steps.health.outputs.status }}
+      response: ${{ steps.health.outputs.response }}
+    steps:
+      # ────────────────────────────────────────────────────────
+      # Step: Check the staging health endpoint
+      # ────────────────────────────────────────────────────────
+      - name: Check staging health endpoint
+        id: health
+        # continue-on-error prevents the job from failing
+        # if curl returns an error. We handle failures ourselves.
+        continue-on-error: true
+        run: |
+          echo "Checking staging health at http://${{ secrets.STAGING_HOST }}:5000/api/health"
+
+          # Attempt to reach the health endpoint
+          # --max-time 30: timeout after 30 seconds
+          # --retry 3: retry up to 3 times on transient failures
+          # --retry-delay 5: wait 5 seconds between retries
+          HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 5 \
+            "http://${{ secrets.STAGING_HOST }}:5000/api/health" 2>/dev/null || echo "000")
+
+          RESPONSE=$(cat /tmp/response.txt 2>/dev/null || echo "No response")
+
+          echo "HTTP Status Code: ${HTTP_CODE}"
+          echo "Response: ${RESPONSE}"
+
+          if [ "${HTTP_CODE}" = "200" ]; then
+            echo "status=healthy" >> "$GITHUB_OUTPUT"
+            echo "response=${RESPONSE}" >> "$GITHUB_OUTPUT"
+            echo "Staging is HEALTHY"
+          else
+            echo "status=unhealthy" >> "$GITHUB_OUTPUT"
+            echo "response=HTTP ${HTTP_CODE}: ${RESPONSE}" >> "$GITHUB_OUTPUT"
+            echo "Staging is UNHEALTHY (HTTP ${HTTP_CODE})"
+            # Exit with error to mark the step as failed
+            # (but continue-on-error keeps the job going)
+            exit 1
+          fi
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 2: CHECK PRODUCTION — Health Check for Production
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Verify that the production environment is healthy.
+  # Same pattern as staging, but pointing to the production host.
+  #
+  # TEACHING NOTE: Both staging and production checks run IN PARALLEL
+  # (no `needs:` dependency). This is intentional — we want to
+  # check both environments simultaneously for faster results.
+  check-production:
+    name: Check Production Health
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.health.outputs.status }}
+      response: ${{ steps.health.outputs.response }}
+    steps:
+      # ────────────────────────────────────────────────────────
+      # Step: Check the production health endpoint
+      # ────────────────────────────────────────────────────────
+      - name: Check production health endpoint
+        id: health
+        continue-on-error: true
+        run: |
+          echo "Checking production health at http://${{ secrets.PRODUCTION_HOST }}:5000/api/health"
+
+          HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 5 \
+            "http://${{ secrets.PRODUCTION_HOST }}:5000/api/health" 2>/dev/null || echo "000")
+
+          RESPONSE=$(cat /tmp/response.txt 2>/dev/null || echo "No response")
+
+          echo "HTTP Status Code: ${HTTP_CODE}"
+          echo "Response: ${RESPONSE}"
+
+          if [ "${HTTP_CODE}" = "200" ]; then
+            echo "status=healthy" >> "$GITHUB_OUTPUT"
+            echo "response=${RESPONSE}" >> "$GITHUB_OUTPUT"
+            echo "Production is HEALTHY"
+          else
+            echo "status=unhealthy" >> "$GITHUB_OUTPUT"
+            echo "response=HTTP ${HTTP_CODE}: ${RESPONSE}" >> "$GITHUB_OUTPUT"
+            echo "Production is UNHEALTHY (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 3: REPORT — Create GitHub Issue if Any Check Failed
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: If either staging or production health check failed,
+  # automatically create a GitHub Issue to alert the team.
+  #
+  # TEACHING NOTE: This is "alerting as code." Instead of using
+  # a separate alerting tool, we use GitHub Issues as our
+  # notification mechanism. The issue:
+  #   - Appears in the repo's Issues tab
+  #   - Can trigger email/Slack notifications (via GitHub settings)
+  #   - Creates a trackable ticket for the incident
+  #   - Can be assigned to team members
+  report:
+    name: Report Results
+    needs: [check-staging, check-production]
+    # Run even if health checks failed (that's the whole point!)
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # ────────────────────────────────────────────────────────
+      # Step: Print health check summary
+      # ────────────────────────────────────────────────────────
+      - name: Health check summary
+        run: |
+          echo "╔══════════════════════════════════════════╗"
+          echo "║  HEALTH CHECK RESULTS                    ║"
+          echo "╠══════════════════════════════════════════╣"
+          echo "║  Staging:    ${{ needs.check-staging.outputs.status || 'unknown' }}"
+          echo "║  Production: ${{ needs.check-production.outputs.status || 'unknown' }}"
+          echo "║  Time:       $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "╚══════════════════════════════════════════╝"
+
+      # ────────────────────────────────────────────────────────
+      # Step: Create a GitHub Issue if any check failed
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: We only create an issue if something failed.
+      # The `if:` condition checks whether either health check
+      # reported an unhealthy status. This prevents issue spam
+      # when everything is working fine.
+      #
+      # We also check for duplicate issues — if there's already
+      # an open issue about this environment being unhealthy,
+      # we don't create another one (to avoid flooding the repo
+      # with duplicate issues every 6 hours).
+      - name: Create GitHub Issue for failures
+        if: >
+          needs.check-staging.outputs.status == 'unhealthy' ||
+          needs.check-production.outputs.status == 'unhealthy' ||
+          needs.check-staging.result == 'failure' ||
+          needs.check-production.result == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const stagingStatus = '${{ needs.check-staging.outputs.status }}' || 'unknown';
+            const productionStatus = '${{ needs.check-production.outputs.status }}' || 'unknown';
+            const stagingResponse = '${{ needs.check-staging.outputs.response }}' || 'No response captured';
+            const productionResponse = '${{ needs.check-production.outputs.response }}' || 'No response captured';
+
+            // Determine which environments are unhealthy
+            const unhealthyEnvs = [];
+            if (stagingStatus !== 'healthy') unhealthyEnvs.push('Staging');
+            if (productionStatus !== 'healthy') unhealthyEnvs.push('Production');
+
+            const title = `Health Check Alert: ${unhealthyEnvs.join(' & ')} ${unhealthyEnvs.length === 1 ? 'is' : 'are'} unhealthy`;
+
+            // ── Check for existing open issues to avoid duplicates ──
+            // TEACHING NOTE: This prevents creating a new issue every
+            // 6 hours for the same problem. We search for open issues
+            // with the "health-check-alert" label.
+            const { data: existingIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'health-check-alert',
+              per_page: 5
+            });
+
+            if (existingIssues.length > 0) {
+              // Add a comment to the existing issue instead of creating a new one
+              console.log(`Found existing health check issue #${existingIssues[0].number}, adding comment...`);
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssues[0].number,
+                body: [
+                  `## Health Check Update — ${new Date().toISOString()}`,
+                  ``,
+                  `| Environment | Status |`,
+                  `|-------------|--------|`,
+                  `| Staging | ${stagingStatus === 'healthy' ? '✅ Healthy' : '❌ Unhealthy'} |`,
+                  `| Production | ${productionStatus === 'healthy' ? '✅ Healthy' : '❌ Unhealthy'} |`,
+                  ``,
+                  `**Run:** [#${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+                ].join('\n')
+              });
+
+              console.log('Comment added to existing issue.');
+              return;
+            }
+
+            // ── Create a new issue ──
+            const body = [
+              `## Health Check Failure Report`,
+              ``,
+              `One or more environments failed their health check.`,
+              ``,
+              `### Results`,
+              ``,
+              `| Environment | Status | Details |`,
+              `|-------------|--------|---------|`,
+              `| Staging | ${stagingStatus === 'healthy' ? '✅ Healthy' : '❌ Unhealthy'} | ${stagingResponse} |`,
+              `| Production | ${productionStatus === 'healthy' ? '✅ Healthy' : '❌ Unhealthy'} | ${productionResponse} |`,
+              ``,
+              `### Diagnostic Information`,
+              ``,
+              `- **Check Time**: ${new Date().toISOString()}`,
+              `- **Workflow Run**: [#${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              `- **Triggered By**: ${context.eventName === 'schedule' ? 'Scheduled (cron)' : 'Manual dispatch'}`,
+              ``,
+              `### Troubleshooting Steps`,
+              ``,
+              `1. **Check the EC2 instance**: Is the server running? (AWS Console)`,
+              `2. **Check Docker**: SSH into the server and run \`docker ps\` — is the container running?`,
+              `3. **Check logs**: Run \`docker logs cicd-demo-app\` for application logs`,
+              `4. **Check resources**: Run \`docker stats\` — is the container out of memory?`,
+              `5. **Network issues**: Can the GitHub Actions runner reach the EC2 on port 5000?`,
+              `6. **Try a rollback**: If the issue started after a recent deploy, consider rolling back`,
+              ``,
+              `### Resolution`,
+              ``,
+              `Once the issue is resolved, close this issue. The next health check will confirm the fix.`,
+              ``,
+              `---`,
+              `*This issue was automatically created by the scheduled health check workflow.*`,
+            ].join('\n');
+
+            const { data: issue } = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['health-check-alert', 'bug', 'priority:high']
+            });
+
+            console.log(`Created issue #${issue.number}: ${issue.html_url}`);
+
+      # ────────────────────────────────────────────────────────
+      # Step: Log success if everything is healthy
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: Even when things are working, it's good
+      # to have a clear log entry. This helps confirm that the
+      # health checks are actually running as expected.
+      - name: All healthy
+        if: >
+          needs.check-staging.outputs.status == 'healthy' &&
+          needs.check-production.outputs.status == 'healthy'
+        run: |
+          echo "╔══════════════════════════════════════════╗"
+          echo "║  ALL SYSTEMS HEALTHY                     ║"
+          echo "╠══════════════════════════════════════════╣"
+          echo "║  Staging:    ✅ Healthy                   ║"
+          echo "║  Production: ✅ Healthy                   ║"
+          echo "║  Time:       $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "╚══════════════════════════════════════════╝"

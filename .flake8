@@ -1,0 +1,29 @@
+[flake8]
+# Maximum allowed line length.
+# 99 is a common choice that balances readability with
+# avoiding excessive line wrapping. Matches Black's default.
+max-line-length = 99
+
+# Directories and patterns to exclude from linting.
+# These are either generated files, third-party code, or
+# virtual environments that we don't control.
+exclude =
+    .git,
+    __pycache__,
+    build,
+    dist,
+    *.egg-info,
+    venv,
+    .venv
+
+# Errors to ignore globally:
+# E203 - whitespace before ':' (conflicts with Black formatter)
+# W503 - line break before binary operator (deprecated rule,
+#         PEP 8 now prefers breaks BEFORE operators)
+ignore = E203,W503
+
+# McCabe complexity threshold.
+# Functions with cyclomatic complexity above this value will
+# be flagged. 10 is a reasonable default -- anything higher
+# suggests the function should be broken into smaller pieces.
+max-complexity = 10

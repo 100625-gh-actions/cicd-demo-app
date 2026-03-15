@@ -1,0 +1,177 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  PR Review Automation — Label Management on Reviews                         ║
+# ║                                                                             ║
+# ║  WHAT:  This workflow automatically manages PR labels based on reviews.     ║
+# ║         When a reviewer approves, it adds "approved" and removes            ║
+# ║         "changes-requested". When changes are requested, it does the        ║
+# ║         opposite.                                                           ║
+# ║                                                                             ║
+# ║  WHEN:  Triggered when a pull request review is submitted.                  ║
+# ║                                                                             ║
+# ║  WHY:   Labels provide visual indicators on the PR list page,               ║
+# ║         making it easy to scan which PRs are ready to merge                 ║
+# ║         vs. which need more work. This automation eliminates                ║
+# ║         the need for manual label management.                               ║
+# ║                                                                             ║
+# ║  WHAT STUDENTS SHOULD OBSERVE:                                              ║
+# ║    1. Submit an "Approve" review on a PR → "approved" label appears         ║
+# ║    2. Submit a "Request Changes" review → "changes-requested" appears       ║
+# ║    3. Labels toggle automatically — you never need to set them manually     ║
+# ║    4. Check the PR's label history in the timeline                          ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: PR Review Automation
+
+# ──────────────────────────────────────────────────────────────
+# TRIGGER: When a review is submitted on a Pull Request
+# ──────────────────────────────────────────────────────────────
+# The `pull_request_review` event fires when a reviewer submits
+# their review. The review can have one of three states:
+#   - "approved"          → The reviewer approves the changes
+#   - "changes_requested" → The reviewer requests modifications
+#   - "commented"         → The reviewer leaves comments only
+#
+# We only listen for `submitted` (not `edited` or `dismissed`)
+# because we want to react to new review decisions.
+on:
+  pull_request_review:
+    types: [submitted]
+    # TEACHING NOTE: Other available types are:
+    # - 'edited':    When a review's body text is changed
+    # - 'dismissed': When a review is dismissed by someone
+    # We don't need those for label management.
+
+# ──────────────────────────────────────────────────────────────
+# PERMISSIONS: Minimal access required
+# ──────────────────────────────────────────────────────────────
+# We need write access to pull-requests to manage labels.
+# We need read access to contents for the checkout.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ════════════════════════════════════════════════════════════
+  # JOB: AUTO-LABEL — Add/Remove Labels Based on Review State
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Automatically reflect the review state in PR labels.
+  # This gives the team an at-a-glance view of PR status on the
+  # pull requests list page.
+  #
+  # TEACHING NOTE: This is a great example of "toil reduction."
+  # Instead of manually managing labels (which people forget),
+  # we automate it. This is a common pattern in DevOps:
+  # "If you do it more than twice, automate it."
+  auto-label:
+    name: Auto-Label PR
+    runs-on: ubuntu-latest
+
+    # Only run when the review is an approval or change request.
+    # We skip "commented" reviews because they don't indicate
+    # a decision about the PR's readiness.
+    if: >
+      github.event.review.state == 'approved' ||
+      github.event.review.state == 'changes_requested'
+
+    steps:
+      # ────────────────────────────────────────────────────────
+      # Step 1: Manage labels based on the review decision
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: We use actions/github-script because
+      # label management requires multiple API calls:
+      #   1. Try to add the appropriate label
+      #   2. Try to remove the opposite label
+      # We wrap removals in try/catch because the label might
+      # not exist yet (e.g., first review on a fresh PR).
+      - name: Update PR labels based on review
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const reviewState = context.payload.review.state;
+            const reviewer = context.payload.review.user.login;
+
+            console.log(`Review by ${reviewer}: ${reviewState} on PR #${prNumber}`);
+
+            // ── CASE 1: Review APPROVED ──
+            // Add "approved" label, remove "changes-requested" if present
+            if (reviewState === 'approved') {
+              console.log('Adding "approved" label...');
+
+              // Add the "approved" label
+              // NOTE: If the label doesn't exist in the repo yet, GitHub
+              // will auto-create it with a default color.
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: ['approved']
+              });
+
+              // Remove "changes-requested" label if it exists
+              // We wrap this in try/catch because the label might not
+              // be present, and the API would return a 404 error.
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: 'changes-requested'
+                });
+                console.log('Removed "changes-requested" label');
+              } catch (e) {
+                // Label wasn't present — that's fine, nothing to remove
+                console.log('"changes-requested" label was not present, skipping removal');
+              }
+
+              console.log('PR labeled as approved!');
+            }
+
+            // ── CASE 2: CHANGES REQUESTED ──
+            // Add "changes-requested" label, remove "approved" if present
+            if (reviewState === 'changes_requested') {
+              console.log('Adding "changes-requested" label...');
+
+              // Add the "changes-requested" label
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: ['changes-requested']
+              });
+
+              // Remove "approved" label if it exists
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: 'approved'
+                });
+                console.log('Removed "approved" label');
+              } catch (e) {
+                // Label wasn't present — nothing to remove
+                console.log('"approved" label was not present, skipping removal');
+              }
+
+              console.log('PR labeled as changes-requested!');
+            }
+
+      # ────────────────────────────────────────────────────────
+      # Step 2: Log the action for audit trail
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: Logging is important in CI/CD pipelines.
+      # When something goes wrong at 2 AM, you want to know
+      # exactly what happened and when.
+      - name: Log review action
+        run: |
+          echo "========================================="
+          echo "PR Review Automation Summary"
+          echo "========================================="
+          echo "PR Number:    #${{ github.event.pull_request.number }}"
+          echo "Reviewer:     ${{ github.event.review.user.login }}"
+          echo "Review State: ${{ github.event.review.state }}"
+          echo "PR Author:    ${{ github.event.pull_request.user.login }}"
+          echo "PR Title:     ${{ github.event.pull_request.title }}"
+          echo "Timestamp:    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "========================================="

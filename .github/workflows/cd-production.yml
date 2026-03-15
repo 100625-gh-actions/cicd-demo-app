@@ -1,0 +1,384 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  CD Pipeline — Deploy to Production                                         ║
+# ║                                                                             ║
+# ║  WHAT:  This workflow deploys the application to PRODUCTION when a          ║
+# ║         GitHub Release is published. It builds a version-tagged Docker      ║
+# ║         image, deploys it to the production EC2 instance, and generates     ║
+# ║         release notes from merged PRs.                                      ║
+# ║                                                                             ║
+# ║  WHEN:  Triggered when a GitHub Release is published (not drafted).         ║
+# ║                                                                             ║
+# ║  WHY:   Production deployments should be deliberate, versioned, and         ║
+# ║         auditable. Using GitHub Releases ties each deployment to a          ║
+# ║         semantic version (v1.0.0), a changelog, and a point-in-time        ║
+# ║         snapshot of the code. Combined with environment protection          ║
+# ║         rules, this ensures human oversight before production changes.      ║
+# ║                                                                             ║
+# ║  WHAT STUDENTS SHOULD OBSERVE:                                              ║
+# ║    1. Create a Release (e.g., v1.0.0) and publish it                       ║
+# ║    2. The workflow builds an image tagged with the version number           ║
+# ║    3. The deploy-production job PAUSES waiting for manual approval          ║
+# ║       (if environment protection rules are configured)                      ║
+# ║    4. After approval, the production EC2 gets the new version              ║
+# ║    5. The release description is auto-updated with a changelog              ║
+# ║                                                                             ║
+# ║  KEY CONCEPT: GitHub Releases + Semantic Versioning                         ║
+# ║    - v1.0.0 → Major.Minor.Patch                                            ║
+# ║    - Major: breaking changes (v1→v2)                                        ║
+# ║    - Minor: new features, backward compatible (v1.0→v1.1)                   ║
+# ║    - Patch: bug fixes (v1.0.0→v1.0.1)                                      ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: CD — Deploy to Production
+
+# ──────────────────────────────────────────────────────────────
+# TRIGGER: When a GitHub Release is published
+# ──────────────────────────────────────────────────────────────
+# A Release in GitHub is a packaged version of your software.
+# It includes:
+#   - A git tag (e.g., v1.0.0)
+#   - Release title and description
+#   - Optional binary attachments
+#
+# TEACHING NOTE: We use `published` not `created` because:
+#   - `created` fires for draft releases too
+#   - `published` only fires when the release is made public
+#   - This lets you prepare a release as a draft, review it,
+#     and publish when ready to deploy
+on:
+  release:
+    types: [published]
+    # TEACHING NOTE: Other available types:
+    # - 'created':       Fires for drafts too (too early)
+    # - 'edited':        Release description was changed
+    # - 'prereleased':   Marked as pre-release (e.g., v1.0.0-beta.1)
+    # - 'released':      Similar to published but subtly different
+    # - 'deleted':       Release was deleted
+
+# ──────────────────────────────────────────────────────────────
+# CONCURRENCY: Prevent parallel production deployments
+# ──────────────────────────────────────────────────────────────
+# TEACHING NOTE: This is even MORE critical for production than
+# staging. We absolutely cannot have two deployments racing to
+# update the production server simultaneously.
+# cancel-in-progress is set to FALSE here because we don't want
+# to cancel a production deployment that's already in progress.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+# ──────────────────────────────────────────────────────────────
+# PERMISSIONS
+# ──────────────────────────────────────────────────────────────
+permissions:
+  contents: write      # Update release notes
+  packages: write      # Push Docker images to GHCR
+
+jobs:
+  # ════════════════════════════════════════════════════════════
+  # JOB 1: BUILD RELEASE — Build Version-Tagged Docker Image
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Build a Docker image tagged with the release version
+  # (e.g., v1.0.0) and push it to GHCR. This creates an immutable,
+  # version-specific artifact that can be deployed (or rolled back to)
+  # at any time.
+  #
+  # TEACHING NOTE: Unlike staging (which uses SHA tags), production
+  # uses semantic version tags. This makes it easy to:
+  #   - Know exactly what version is running in production
+  #   - Roll back to a specific version by tag name
+  #   - Communicate versions to stakeholders ("we're on v2.1.0")
+  build-release:
+    name: Build Release Image
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ────────────────────────────────────────────────────────
+      # Step: Extract version from the release tag
+      # ────────────────────────────────────────────────────────
+      # The release tag (e.g., "v1.0.0") is available in the
+      # github.event.release.tag_name context variable.
+      - name: Extract version tag
+        id: version
+        run: |
+          VERSION_TAG=${{ github.event.release.tag_name }}
+          echo "tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building release version: ${VERSION_TAG}"
+
+      # ────────────────────────────────────────────────────────
+      # Step: Login to GHCR
+      # ────────────────────────────────────────────────────────
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      # ────────────────────────────────────────────────────────
+      # Step: Build Docker image with version tag
+      # ────────────────────────────────────────────────────────
+      # We create THREE tags for release builds:
+      #   1. The version tag (v1.0.0) — immutable, specific version
+      #   2. `latest` — always points to the newest release
+      #   3. SHA tag — for traceability back to the exact commit
+      #
+      # TEACHING NOTE: The version tag should NEVER be overwritten.
+      # Once v1.0.0 is built, that tag always refers to the same image.
+      # This is what makes rollbacks reliable.
+      - name: Build Docker image
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
+          docker build \
+            --build-arg APP_VERSION=${{ steps.version.outputs.tag }} \
+            --build-arg BUILD_SHA=${{ github.sha }} \
+            -t ghcr.io/100625-gh-actions/cicd-demo-app:${{ steps.version.outputs.tag }} \
+            -t ghcr.io/100625-gh-actions/cicd-demo-app:latest \
+            -t ghcr.io/100625-gh-actions/cicd-demo-app:sha-${SHORT_SHA} \
+            .
+
+      # ────────────────────────────────────────────────────────
+      # Step: Push all tags to GHCR
+      # ────────────────────────────────────────────────────────
+      - name: Push Docker image to GHCR
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
+          echo "Pushing release image to GHCR..."
+          docker push ghcr.io/100625-gh-actions/cicd-demo-app:${{ steps.version.outputs.tag }}
+          docker push ghcr.io/100625-gh-actions/cicd-demo-app:latest
+          docker push ghcr.io/100625-gh-actions/cicd-demo-app:sha-${SHORT_SHA}
+          echo "All tags pushed successfully!"
+
+      # ────────────────────────────────────────────────────────
+      # Step: Verify image in GHCR
+      # ────────────────────────────────────────────────────────
+      - name: Verify pushed image
+        run: |
+          echo "Verifying image can be pulled..."
+          docker pull ghcr.io/100625-gh-actions/cicd-demo-app:${{ steps.version.outputs.tag }}
+          echo "Image verified: ghcr.io/100625-gh-actions/cicd-demo-app:${{ steps.version.outputs.tag }}"
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 2: DEPLOY TO PRODUCTION — The Big Moment
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Deploy the release version to the production EC2 instance.
+  #
+  # ╔════════════════════════════════════════════════════════╗
+  # ║  CRITICAL TEACHING NOTE: ENVIRONMENT PROTECTION RULES  ║
+  # ╠════════════════════════════════════════════════════════╣
+  # ║                                                        ║
+  # ║  The `environment: production` setting below is the    ║
+  # ║  KEY to manual approval gates!                         ║
+  # ║                                                        ║
+  # ║  In the GitHub repo settings, you can configure the    ║
+  # ║  "production" environment with:                        ║
+  # ║    - Required reviewers (someone must click "Approve") ║
+  # ║    - Wait timer (e.g., wait 5 minutes before deploy)   ║
+  # ║    - Deployment branches (only main can deploy)        ║
+  # ║                                                        ║
+  # ║  When this job starts, it will PAUSE and show a yellow ║
+  # ║  "Waiting for review" badge in the Actions UI.         ║
+  # ║  A designated reviewer must click "Approve" before     ║
+  # ║  the deployment proceeds.                              ║
+  # ║                                                        ║
+  # ║  This is how companies ensure human oversight for       ║
+  # ║  production changes — even with full automation!        ║
+  # ╚════════════════════════════════════════════════════════╝
+  deploy-production:
+    name: Deploy to Production
+    needs: [build-release]
+    runs-on: ubuntu-latest
+
+    # THIS IS THE MANUAL APPROVAL GATE!
+    # When GitHub sees `environment: production`, it checks
+    # the environment protection rules configured in the repo settings.
+    # If required reviewers are set, the workflow pauses here.
+    environment:
+      name: production
+      url: http://${{ secrets.PRODUCTION_HOST }}:5000
+
+    steps:
+      # ────────────────────────────────────────────────────────
+      # Step: Deploy via SSH to production EC2
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: The deployment pattern is identical to staging.
+      # This is intentional — staging should mirror production so
+      # that if it works in staging, it will work in production.
+      # The only differences are:
+      #   - Different host (PRODUCTION_HOST vs STAGING_HOST)
+      #   - ENVIRONMENT=production instead of staging
+      #   - The version tag (v1.0.0 instead of sha-xxx)
+      - name: Deploy to production EC2 via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ec2-user
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "╔══════════════════════════════════════════╗"
+            echo "║  DEPLOYING TO PRODUCTION                 ║"
+            echo "║  Version: ${{ needs.build-release.outputs.version }}"
+            echo "║  Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "╚══════════════════════════════════════════╝"
+
+            # Login to GHCR
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Pull the release-tagged image
+            docker pull ghcr.io/100625-gh-actions/cicd-demo-app:${{ needs.build-release.outputs.version }}
+
+            # Stop and remove the old container
+            docker stop cicd-demo-app || true
+            docker rm cicd-demo-app || true
+
+            # Start the new container with production settings
+            docker run -d \
+              --name cicd-demo-app \
+              --restart unless-stopped \
+              -p 5000:5000 \
+              -e APP_VERSION=${{ needs.build-release.outputs.version }} \
+              -e ENVIRONMENT=production \
+              -e BUILD_SHA=${{ github.sha }} \
+              ghcr.io/100625-gh-actions/cicd-demo-app:${{ needs.build-release.outputs.version }}
+
+            # Clean up old images
+            docker image prune -f
+
+            echo "Production deployment complete!"
+
+      # ────────────────────────────────────────────────────────
+      # Step: Verify production health
+      # ────────────────────────────────────────────────────────
+      - name: Verify production deployment
+        run: |
+          echo "Waiting for production to start..."
+          sleep 15
+
+          echo "Checking production health endpoint..."
+          RESPONSE=$(curl -sf \
+            --retry 5 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            http://${{ secrets.PRODUCTION_HOST }}:5000/api/health)
+
+          echo "Production health check response:"
+          echo "$RESPONSE" | python3 -m json.tool
+
+          # Verify the deployed version matches the release
+          echo "$RESPONSE" | grep -q "${{ needs.build-release.outputs.version }}" && \
+            echo "Production deployment verified!" || \
+            echo "WARNING: Version mismatch detected!"
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 3: GENERATE RELEASE NOTES — Auto-Changelog
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Automatically update the GitHub Release description
+  # with a changelog generated from merged PRs since the last
+  # release. This saves the release manager from manually writing
+  # "what changed" notes.
+  #
+  # TEACHING NOTE: This demonstrates how automation can handle
+  # tedious documentation tasks. The changelog is generated from
+  # PR titles and authors, so having good PR titles is important!
+  generate-release-notes:
+    name: Generate Release Notes
+    needs: [deploy-production]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # Needed to update the release description
+    steps:
+      - name: Generate changelog from merged PRs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release = context.payload.release;
+            const currentTag = release.tag_name;
+
+            console.log(`Generating release notes for ${currentTag}...`);
+
+            // ── Step 1: Find the previous release ──
+            // We need to know the boundary — which PRs were merged
+            // between the last release and this one?
+            let previousTag = null;
+            try {
+              const { data: releases } = await github.rest.repos.listReleases({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 10
+              });
+
+              // Find the release right before this one
+              const currentIndex = releases.findIndex(r => r.tag_name === currentTag);
+              if (currentIndex >= 0 && currentIndex < releases.length - 1) {
+                previousTag = releases[currentIndex + 1].tag_name;
+              }
+            } catch (e) {
+              console.log('Could not find previous release, will include all merged PRs');
+            }
+
+            console.log(`Previous release: ${previousTag || 'none (first release)'}`);
+
+            // ── Step 2: Get merged PRs since the last release ──
+            // We search for PRs that were merged after the previous release date
+            let query = `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged`;
+
+            if (previousTag) {
+              // Get the date of the previous release to filter PRs
+              try {
+                const { data: prevRelease } = await github.rest.repos.getReleaseByTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag: previousTag
+                });
+                query += ` merged:>${prevRelease.published_at}`;
+              } catch (e) {
+                console.log('Could not get previous release date');
+              }
+            }
+
+            const { data: searchResults } = await github.rest.search.issuesAndPullRequests({
+              q: query,
+              sort: 'created',
+              order: 'desc',
+              per_page: 50
+            });
+
+            // ── Step 3: Build the changelog markdown ──
+            const prList = searchResults.items.map(pr => {
+              return `- ${pr.title} (#${pr.number}) by @${pr.user.login}`;
+            }).join('\n');
+
+            const changelog = [
+              `## What's Changed`,
+              ``,
+              prList || '- No PRs found for this release',
+              ``,
+              `## Deployment Info`,
+              `- **Version**: \`${currentTag}\``,
+              `- **Commit**: \`${context.sha.substring(0, 7)}\``,
+              `- **Deployed by**: @${context.actor}`,
+              `- **Deploy time**: ${new Date().toISOString()}`,
+              ``,
+              `---`,
+              `*Release notes auto-generated by CI/CD pipeline*`
+            ].join('\n');
+
+            // ── Step 4: Update the release with the changelog ──
+            // We append to the existing body (don't overwrite manual notes)
+            const existingBody = release.body || '';
+            const updatedBody = existingBody
+              ? `${existingBody}\n\n---\n\n${changelog}`
+              : changelog;
+
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.id,
+              body: updatedBody
+            });
+
+            console.log('Release notes updated successfully!');
+            console.log('Changelog:');
+            console.log(changelog);

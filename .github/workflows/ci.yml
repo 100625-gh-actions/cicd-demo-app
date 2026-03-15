@@ -1,0 +1,265 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  CI Pipeline — Continuous Integration                                       ║
+# ║                                                                             ║
+# ║  WHAT:  This workflow validates code quality on every Pull Request.          ║
+# ║         It runs linting, unit tests, and a Docker build to ensure            ║
+# ║         that the proposed changes meet quality standards.                    ║
+# ║                                                                             ║
+# ║  WHEN:  Triggered automatically when a PR is opened, updated, or reopened.  ║
+# ║                                                                             ║
+# ║  WHY:   CI is the "quality gate" — it prevents broken or poorly-written     ║
+# ║         code from being merged into the main branch. If CI fails,           ║
+# ║         the PR cannot be merged (when branch protection rules are set).     ║
+# ║                                                                             ║
+# ║  WHAT STUDENTS SHOULD OBSERVE:                                              ║
+# ║    1. Open a PR and watch the checks appear on the PR page                  ║
+# ║    2. Each job (lint, test, build) runs independently at first              ║
+# ║    3. The build job waits for lint+test to pass (see `needs:`)              ║
+# ║    4. A summary comment is posted to the PR with results                    ║
+# ║    5. If you push a fix, the workflow re-runs (synchronize event)           ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: CI Pipeline
+
+# ──────────────────────────────────────────────────────────────
+# TRIGGER: When does this workflow run?
+# ──────────────────────────────────────────────────────────────
+# This workflow runs on pull_request events targeting any branch.
+# We listen for three specific activity types:
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    # TEACHING NOTE: Understanding PR event types
+    # - 'opened':      Fires when a PR is first created.
+    # - 'synchronize': Fires when new commits are pushed to the PR's source branch.
+    #                  This is how CI re-runs every time you push a fix.
+    # - 'reopened':    Fires when a previously closed PR is reopened.
+    #
+    # NOTE: We intentionally do NOT include 'edited' (title/description changes)
+    # because those don't affect code quality and would waste CI minutes.
+
+# ──────────────────────────────────────────────────────────────
+# PERMISSIONS: Least-privilege security
+# ──────────────────────────────────────────────────────────────
+# We only request the permissions this workflow actually needs.
+# TEACHING NOTE: Always follow the principle of least privilege.
+# Default GITHUB_TOKEN permissions are read-only for everything;
+# we explicitly grant write access only where needed.
+permissions:
+  contents: read          # Read repo code (checkout)
+  pull-requests: write    # Post CI summary comment on the PR
+
+jobs:
+  # ════════════════════════════════════════════════════════════
+  # JOB 1: LINT — Code Style and Quality Check
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Enforce consistent code style across the team.
+  # Flake8 checks for PEP 8 violations, syntax errors, and
+  # common programming mistakes. This catches issues like:
+  #   - Unused imports
+  #   - Undefined variables
+  #   - Lines that are too long
+  #   - Missing whitespace
+  #
+  # TEACHING NOTE: Linting is the fastest check, so it runs first.
+  # If your code has style issues, you'll know within seconds
+  # rather than waiting for slow tests to complete.
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Check out the PR's code
+      # Without this, the runner has an empty workspace
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up the Python runtime
+      # We pin to 3.12 to match our production environment
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Step 3: Install the linter
+      # We only install flake8 here, not the full app dependencies,
+      # because linting doesn't need to import the application code.
+      - name: Install linting tools
+        run: pip install flake8
+
+      # Step 4: Run flake8 on both app code and test code
+      # TEACHING NOTE: We lint tests/ too because test code should
+      # also follow coding standards. Sloppy tests lead to false
+      # positives and hard-to-debug CI failures.
+      - name: Run flake8 linter
+        run: flake8 app/ tests/
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 2: TEST — Unit Tests with Coverage
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Verify that the application logic works correctly.
+  # We run pytest with coverage to ensure:
+  #   1. All tests pass (no regressions)
+  #   2. We know how much code is covered by tests
+  #
+  # TEACHING NOTE: Tests and linting run IN PARALLEL (no `needs:`).
+  # This is a key CI optimization — independent checks should run
+  # concurrently to give faster feedback.
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Check out the code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python to match production
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Step 3: Install ALL dependencies (app + dev/test tools)
+      # requirements.txt     = Flask, gunicorn, etc. (runtime deps)
+      # requirements-dev.txt = pytest, coverage, etc. (test deps)
+      - name: Install dependencies
+        run: pip install -r app/requirements.txt -r app/requirements-dev.txt
+
+      # Step 4: Run pytest with coverage reporting
+      # Flags explained:
+      #   -v                    = verbose output (show each test name)
+      #   --cov=app             = measure coverage for the app/ directory
+      #   --cov-report=term     = print coverage summary in the terminal
+      #   --cov-report=xml      = generate coverage.xml for artifact upload
+      - name: Run unit tests with coverage
+        run: pytest tests/ -v --cov=app --cov-report=term-missing --cov-report=xml
+
+      # Step 5: Upload coverage report as an artifact
+      # TEACHING NOTE: Artifacts persist after the workflow finishes.
+      # You can download them from the Actions tab to inspect coverage
+      # details, or use them in downstream jobs/tools like Codecov.
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 30
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 3: BUILD — Docker Image Build Verification
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Verify that the Dockerfile builds successfully.
+  # We build the image but do NOT push it — this is just a
+  # "can it build?" check. Pushing happens in the CD pipeline.
+  #
+  # TEACHING NOTE: This job uses `needs: [lint, test]` which means
+  # it only runs AFTER both lint and test succeed. This is a
+  # dependency chain — if linting or tests fail, we don't waste
+  # time building a Docker image that we'd never deploy.
+  #
+  #   lint ──┐
+  #          ├──> build
+  #   test ──┘
+  build:
+    name: Build Docker Image
+    needs: [lint, test]
+    # TEACHING NOTE: `needs` creates a dependency. This job waits
+    # for BOTH lint and test to complete successfully. If either
+    # fails, this job is automatically skipped.
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Check out the code (needed for Dockerfile)
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Build the Docker image with metadata
+      # We tag it with the PR number so we can identify it,
+      # and pass build args for version tracking.
+      #
+      # NOTE: We use `docker build` directly here (not docker/build-push-action)
+      # because we're NOT pushing — just verifying the build works.
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg APP_VERSION=pr-${{ github.event.pull_request.number }} \
+            --build-arg BUILD_SHA=${{ github.sha }} \
+            -t cicd-demo-app:pr-${{ github.event.pull_request.number }} \
+            .
+
+      # Step 3: Quick sanity check — verify the image was created
+      # TEACHING NOTE: This is a good practice — always verify
+      # your build artifacts exist before declaring success.
+      - name: Verify image was built
+        run: |
+          echo "Verifying Docker image was built successfully..."
+          docker images cicd-demo-app:pr-${{ github.event.pull_request.number }}
+          echo "Docker image built and verified!"
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 4: CI SUMMARY — Post Results to the PR
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Give developers a quick visual summary of CI results
+  # directly on their PR, without needing to click into the Actions tab.
+  #
+  # TEACHING NOTE: The `if: always()` condition is critical here.
+  # Without it, this job would be skipped if any previous job fails
+  # (because of the `needs:` dependency). We WANT this job to run
+  # even when CI fails — so we can report the failure!
+  ci-summary:
+    name: CI Summary
+    needs: [lint, test, build]
+    # `always()` ensures this job runs regardless of whether
+    # lint, test, or build succeeded or failed.
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write    # Needed to post a comment on the PR
+      actions: read           # Needed to read job results
+    steps:
+      # Post a formatted table showing each job's result
+      # TEACHING NOTE: actions/github-script lets you write JavaScript
+      # that interacts with the GitHub API. Here we:
+      #   1. Fetch all jobs in this workflow run
+      #   2. Build a markdown table with results
+      #   3. Post it as a PR comment
+      - name: Post CI Summary Comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Fetch all jobs in this workflow run
+            const { data: jobs } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId
+            });
+
+            // Build a markdown table row for each job (except this summary job)
+            const results = jobs.jobs
+              .filter(j => j.name !== 'CI Summary')
+              .map(j => {
+                const icon = j.conclusion === 'success' ? '✅' :
+                             j.conclusion === 'failure' ? '❌' :
+                             j.conclusion === 'skipped' ? '⏭️' : '⏳';
+                return `| ${j.name} | ${icon} ${j.conclusion || 'pending'} |`;
+              })
+              .join('\n');
+
+            // Determine overall status
+            const allPassed = jobs.jobs
+              .filter(j => j.name !== 'CI Summary')
+              .every(j => j.conclusion === 'success' || j.conclusion === 'skipped');
+
+            const header = allPassed
+              ? '## ✅ CI Pipeline Passed'
+              : '## ❌ CI Pipeline Failed';
+
+            const body = `${header}\n\n| Job | Status |\n|-----|--------|\n${results}\n\n` +
+              `*Commit: \`${context.sha.substring(0, 7)}\` | ` +
+              `Run: [#${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*`;
+
+            // Post the comment on the PR
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });

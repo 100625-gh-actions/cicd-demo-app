@@ -1,0 +1,62 @@
+# ============================================================
+# .dockerignore - Files excluded from the Docker build context
+# ============================================================
+# When you run `docker build`, Docker sends the entire
+# directory (the "build context") to the Docker daemon.
+# This file tells Docker which files to SKIP, making the
+# build faster and the image smaller.
+#
+# Think of it like .gitignore, but for Docker builds.
+# ============================================================
+
+# --- Version Control ---
+# The .git directory can be huge and is never needed in the image
+.git
+
+# --- Infrastructure as Code ---
+# Terraform files are for provisioning cloud resources,
+# not for running inside the application container
+terraform/
+
+# --- Tests ---
+# Tests are run in CI before the image is built;
+# they don't belong inside the production image
+tests/
+
+# --- Documentation ---
+# Docs are for humans, not for containers
+docs/
+*.md
+
+# --- CI/CD Configuration ---
+# GitHub Actions workflows run IN CI, not inside the container
+.github/
+
+# --- Python Artifacts ---
+# Compiled bytecode and caches from local development
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.coverage
+htmlcov/
+
+# --- Environment & Config Files ---
+# Secret files must NEVER be baked into an image
+.env
+.env.*
+.flake8
+
+# --- Build & Project Files ---
+# These are development tools, not runtime dependencies
+Makefile
+
+# --- IDE & Editor Files ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS Files ---
+.DS_Store
+Thumbs.db

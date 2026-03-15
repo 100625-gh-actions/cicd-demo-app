@@ -1,0 +1,351 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  CD Pipeline — Deploy to Staging                                            ║
+# ║                                                                             ║
+# ║  WHAT:  This workflow deploys the application to the STAGING environment     ║
+# ║         every time code is merged to the main branch. It builds a Docker     ║
+# ║         image, pushes it to GitHub Container Registry (GHCR), and deploys   ║
+# ║         it to an EC2 instance via SSH.                                      ║
+# ║                                                                             ║
+# ║  WHEN:  Triggered on every push to the `main` branch.                       ║
+# ║         In practice, this means "after a PR is merged."                     ║
+# ║                                                                             ║
+# ║  WHY:   Staging is a pre-production environment where we verify that        ║
+# ║         the application works in a production-like setting before           ║
+# ║         releasing to real users. It's the "dress rehearsal."                ║
+# ║                                                                             ║
+# ║  WHAT STUDENTS SHOULD OBSERVE:                                              ║
+# ║    1. Merge a PR and watch this workflow trigger automatically              ║
+# ║    2. The Docker image appears in the repo's "Packages" tab                ║
+# ║    3. The staging EC2 instance gets updated with the new version            ║
+# ║    4. The smoke test verifies the deployment actually works                 ║
+# ║    5. The `concurrency` group prevents two deploys from running at once     ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: CD — Deploy to Staging
+
+# ──────────────────────────────────────────────────────────────
+# TRIGGER: Push to main branch only
+# ──────────────────────────────────────────────────────────────
+# When a PR is merged, GitHub creates a "push" event on the
+# target branch (main). This is the standard trigger for
+# continuous deployment to staging.
+#
+# TEACHING NOTE: We don't use `pull_request: merged` because
+# that event type doesn't exist. Instead, merging a PR creates
+# a push event on the target branch.
+on:
+  push:
+    branches:
+      - main
+    # TEACHING NOTE: You could add path filters here to only
+    # deploy when application code changes (not docs):
+    #   paths:
+    #     - 'app/**'
+    #     - 'Dockerfile'
+    #     - 'requirements*.txt'
+
+# ──────────────────────────────────────────────────────────────
+# CONCURRENCY: Prevent parallel deployments
+# ──────────────────────────────────────────────────────────────
+# TEACHING NOTE: This is CRITICAL for deployment safety!
+# If two PRs are merged in quick succession, we don't want
+# two deployments running simultaneously on the same server.
+# The `cancel-in-progress` flag cancels the older deployment
+# so only the latest code gets deployed.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: true
+
+# ──────────────────────────────────────────────────────────────
+# PERMISSIONS: What this workflow is allowed to do
+# ──────────────────────────────────────────────────────────────
+permissions:
+  contents: read       # Read repo code
+  packages: write      # Push Docker images to GHCR
+
+jobs:
+  # ════════════════════════════════════════════════════════════
+  # JOB 1: TEST — Quick Sanity Check on Main
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Even though CI ran on the PR, we run tests again
+  # on main after merge. Why?
+  #   1. The PR branch might have been out of date with main
+  #   2. The merge commit itself could introduce issues
+  #   3. It's a safety net — "trust but verify"
+  #
+  # TEACHING NOTE: This is sometimes called a "post-merge check."
+  # Some teams skip this to save time, but it adds an important
+  # safety layer, especially when PRs are merged without rebasing.
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Install both runtime and test dependencies
+      - name: Install dependencies
+        run: pip install -r app/requirements.txt -r app/requirements-dev.txt
+
+      # Run tests — if they fail, the entire deployment is halted
+      # NOTE: This is where the CD gate prevents broken code
+      # from reaching staging. If tests fail, no image is built,
+      # and no deployment happens.
+      - name: Run unit tests
+        run: pytest tests/ -v
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 2: BUILD & PUSH — Create and Publish Docker Image
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Build the Docker image and push it to GitHub
+  # Container Registry (GHCR). This image will be pulled by
+  # the EC2 instance during deployment.
+  #
+  # TEACHING NOTE: GHCR is GitHub's built-in container registry.
+  # Every GitHub repo can store Docker images for free (with limits).
+  # The image URL follows the pattern:
+  #   ghcr.io/<org-or-user>/<repo-name>:<tag>
+  build-and-push:
+    name: Build & Push Docker Image
+    needs: [test]
+    # Only build if tests passed
+    runs-on: ubuntu-latest
+    # Output the image tag so downstream jobs can use it
+    outputs:
+      image-tag: ${{ steps.meta.outputs.short-sha }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ────────────────────────────────────────────────────────
+      # Step: Generate image metadata (tags and labels)
+      # ────────────────────────────────────────────────────────
+      # We create two tags for each build:
+      #   1. `latest` — always points to the most recent build
+      #   2. `sha-<7chars>` — unique tag tied to the git commit
+      #
+      # TEACHING NOTE: The SHA tag is important for traceability.
+      # If something breaks in staging, you can look at the
+      # running container's tag and trace it back to the exact
+      # commit that was deployed. This is called "build provenance."
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "short-sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Generated tags:"
+          echo "  - ghcr.io/100625-gh-actions/cicd-demo-app:latest"
+          echo "  - ghcr.io/100625-gh-actions/cicd-demo-app:sha-${SHORT_SHA}"
+
+      # ────────────────────────────────────────────────────────
+      # Step: Login to GitHub Container Registry
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: We use the built-in GITHUB_TOKEN secret.
+      # This token is automatically created by GitHub Actions for
+      # every workflow run. It has permissions scoped to this repo
+      # and expires when the workflow finishes.
+      #
+      # No need to create a Personal Access Token (PAT) or store
+      # credentials in secrets — GITHUB_TOKEN is provided by default!
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      # ────────────────────────────────────────────────────────
+      # Step: Build the Docker image
+      # ────────────────────────────────────────────────────────
+      # We embed version information as build args so the running
+      # application can report its own version (useful for
+      # health checks and debugging).
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg APP_VERSION=sha-${{ steps.meta.outputs.short-sha }} \
+            --build-arg BUILD_SHA=${{ github.sha }} \
+            -t ghcr.io/100625-gh-actions/cicd-demo-app:latest \
+            -t ghcr.io/100625-gh-actions/cicd-demo-app:sha-${{ steps.meta.outputs.short-sha }} \
+            .
+
+      # ────────────────────────────────────────────────────────
+      # Step: Push both tags to GHCR
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: We push TWO tags pointing to the SAME image:
+      #   - `latest` — so "docker pull" without a tag gets the newest
+      #   - `sha-xxx` — so we can always pull a specific version
+      # This is a common Docker tagging strategy.
+      - name: Push Docker image to GHCR
+        run: |
+          echo "Pushing image to GitHub Container Registry..."
+          docker push ghcr.io/100625-gh-actions/cicd-demo-app:latest
+          docker push ghcr.io/100625-gh-actions/cicd-demo-app:sha-${{ steps.meta.outputs.short-sha }}
+          echo "Image pushed successfully!"
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 3: DEPLOY TO STAGING — SSH into EC2 and Update
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Pull the new Docker image on the staging EC2
+  # instance and restart the application container.
+  #
+  # TEACHING NOTE: This is a simple "pull and restart" deployment.
+  # In production systems, you might use:
+  #   - Blue/Green deployments (run old and new side by side)
+  #   - Rolling updates (gradually replace instances)
+  #   - Canary releases (send a small % of traffic to new version)
+  # But for learning, this straightforward approach shows the
+  # core concept clearly.
+  deploy-staging:
+    name: Deploy to Staging
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+
+    # ────────────────────────────────────────────────────────
+    # ENVIRONMENT: Link this deployment to the "staging" environment
+    # ────────────────────────────────────────────────────────
+    # TEACHING NOTE: GitHub Environments provide:
+    #   1. Environment-specific secrets (STAGING_HOST vs PRODUCTION_HOST)
+    #   2. Deployment history visible in the repo's "Environments" tab
+    #   3. Protection rules (required reviewers, wait timers)
+    #   4. Deployment status tracking
+    #
+    # For staging, we typically don't require manual approval,
+    # but we still use an environment for tracking and secrets.
+    environment:
+      name: staging
+      url: http://${{ secrets.STAGING_HOST }}:5000
+
+    steps:
+      # ────────────────────────────────────────────────────────
+      # Step: Deploy via SSH
+      # ────────────────────────────────────────────────────────
+      # We use appleboy/ssh-action to execute commands on the
+      # remote EC2 instance. This action handles SSH key auth
+      # and connection management for us.
+      #
+      # TEACHING NOTE: The deployment commands follow this pattern:
+      #   1. Login to GHCR (so the EC2 can pull private images)
+      #   2. Pull the new image
+      #   3. Stop the old container (if running)
+      #   4. Remove the old container
+      #   5. Start a new container with the new image
+      #   6. Clean up old, unused images to save disk space
+      - name: Deploy to staging EC2 via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ec2-user
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # NOTE: The script below runs on the EC2 instance, not on
+          # the GitHub Actions runner. These are remote commands.
+          script: |
+            echo "========================================="
+            echo "Deploying to STAGING"
+            echo "Version: sha-${{ needs.build-and-push.outputs.image-tag }}"
+            echo "Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "========================================="
+
+            # Login to GHCR on the EC2 instance
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Pull the latest image
+            docker pull ghcr.io/100625-gh-actions/cicd-demo-app:sha-${{ needs.build-and-push.outputs.image-tag }}
+
+            # Stop and remove the old container (if it exists)
+            # The `|| true` prevents the command from failing if
+            # there's no existing container (first deployment)
+            docker stop cicd-demo-app || true
+            docker rm cicd-demo-app || true
+
+            # Start the new container
+            # Flags explained:
+            #   -d                  = detached mode (run in background)
+            #   --name              = give the container a name for easy management
+            #   --restart unless-stopped = auto-restart on crash or server reboot
+            #   -p 5000:5000        = map port 5000 on host to port 5000 in container
+            #   -e                  = set environment variables inside the container
+            docker run -d \
+              --name cicd-demo-app \
+              --restart unless-stopped \
+              -p 5000:5000 \
+              -e APP_VERSION=sha-${{ needs.build-and-push.outputs.image-tag }} \
+              -e ENVIRONMENT=staging \
+              -e BUILD_SHA=${{ github.sha }} \
+              ghcr.io/100625-gh-actions/cicd-demo-app:sha-${{ needs.build-and-push.outputs.image-tag }}
+
+            # Clean up old images to save disk space
+            docker image prune -f
+
+            echo "Deployment complete! Container is starting..."
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 4: SMOKE TEST — Verify the Deployment Works
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: After deploying, hit the health endpoint to verify
+  # that the application is actually running and responding.
+  #
+  # TEACHING NOTE: A "smoke test" is a quick, basic test that
+  # verifies the most critical functionality works. The name
+  # comes from electronics — "plug it in and see if smoke comes
+  # out." It's NOT a full test suite; it's just: "is it alive?"
+  smoke-test:
+    name: Smoke Test Staging
+    needs: [deploy-staging, build-and-push]
+    runs-on: ubuntu-latest
+    steps:
+      # ────────────────────────────────────────────────────────
+      # Step: Wait for the application to start
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: Docker containers need a few seconds to
+      # start up, especially if the app needs to initialize
+      # database connections, load configuration, etc.
+      - name: Wait for application to start
+        run: |
+          echo "Waiting 15 seconds for the application to start..."
+          sleep 15
+
+      # ────────────────────────────────────────────────────────
+      # Step: Hit the health endpoint
+      # ────────────────────────────────────────────────────────
+      # We use curl with retry logic because the app might still
+      # be starting up. The --retry flag makes curl try multiple
+      # times before giving up.
+      #
+      # The health endpoint should return something like:
+      #   { "status": "healthy", "version": "sha-abc1234" }
+      - name: Check health endpoint
+        run: |
+          echo "Checking staging health endpoint..."
+
+          # Retry up to 5 times with 10-second delays
+          RESPONSE=$(curl -sf \
+            --retry 5 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            http://${{ secrets.STAGING_HOST }}:5000/api/health)
+
+          echo "Health check response:"
+          echo "$RESPONSE" | python3 -m json.tool
+
+          # Verify the response contains expected version
+          echo "$RESPONSE" | grep -q "sha-${{ needs.build-and-push.outputs.image-tag }}" && \
+            echo "Version matches! Deployment verified." || \
+            echo "WARNING: Version in response doesn't match expected tag."
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+
+      # ────────────────────────────────────────────────────────
+      # Step: Print deployment summary
+      # ────────────────────────────────────────────────────────
+      - name: Deployment summary
+        run: |
+          echo "╔══════════════════════════════════════════╗"
+          echo "║  STAGING DEPLOYMENT COMPLETE             ║"
+          echo "╠══════════════════════════════════════════╣"
+          echo "║  Version: sha-${{ needs.build-and-push.outputs.image-tag }}"
+          echo "║  Commit:  ${{ github.sha }}"
+          echo "║  Actor:   ${{ github.actor }}"
+          echo "║  URL:     http://${{ secrets.STAGING_HOST }}:5000"
+          echo "╚══════════════════════════════════════════╝"

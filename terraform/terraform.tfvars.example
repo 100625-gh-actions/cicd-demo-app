@@ -1,0 +1,38 @@
+# =============================================================================
+# Example Terraform Variables File
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# IMPORTANT: Never commit terraform.tfvars to version control if it contains
+# sensitive values! Add it to .gitignore.
+# =============================================================================
+
+# AWS region (us-east-1 has the most free-tier services)
+aws_region = "us-east-1"
+
+# Docker image path on GitHub Container Registry (without the tag)
+docker_image = "ghcr.io/100625-gh-actions/cicd-demo-app"
+
+# Version tag to deploy (semantic version, git SHA, or "latest")
+app_version = "0.1.0"
+
+# EC2 instance type (t2.micro = free tier)
+# instance_type = "t2.micro"
+
+# EC2 key pair name for SSH access (must already exist in your AWS account)
+# Create one in AWS Console: EC2 > Key Pairs > Create key pair
+# ssh_key_name = "my-key-pair"
+
+# Restrict SSH access to your IP only (recommended for security)
+# Find your IP: curl ifconfig.me
+# allowed_ssh_cidrs = ["203.0.113.50/32"]
+
+# GHCR authentication token
+# RECOMMENDED: Set via environment variable instead of this file:
+#   export TF_VAR_ghcr_token="ghp_xxxxxxxxxxxxxxxxxxxx"
+#
+# To create a token: GitHub > Settings > Developer Settings > Personal Access Tokens
+# Required scope: read:packages
+#
+# ghcr_token = "ghp_..."  # DO NOT commit real tokens!

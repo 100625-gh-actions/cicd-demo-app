@@ -1,0 +1,78 @@
+# ============================================================
+# .gitignore - Files excluded from version control
+# ============================================================
+# This file tells Git which files and directories to ignore.
+# Ignored files won't appear in `git status` and won't be
+# accidentally committed.
+# ============================================================
+
+# --- Python ---
+# Compiled bytecode (created when Python imports modules)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution and packaging artifacts
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments (local dependency installs)
+venv/
+.venv/
+
+# --- Testing ---
+# Pytest cache and coverage reports
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# --- Terraform ---
+# Provider plugins (downloaded by terraform init)
+.terraform/
+
+# State files (contain sensitive infrastructure details)
+*.tfstate
+*.tfstate.*
+
+# Crash logs from Terraform
+crash.log
+
+# Variable files with real values (may contain secrets)
+# NOTE: *.tfvars.example files SHOULD be committed as templates
+*.tfvars
+!*.tfvars.example
+
+# Dependency lock file (can be committed, but often regenerated)
+.terraform.lock.hcl
+
+# --- IDE & Editor ---
+# VS Code workspace settings
+.vscode/
+
+# JetBrains (PyCharm, IntelliJ) project files
+.idea/
+
+# Vim swap files
+*.swp
+*.swo
+
+# --- OS Generated ---
+# macOS Finder metadata
+.DS_Store
+
+# Windows thumbnail cache
+Thumbs.db
+
+# --- Secrets (NEVER commit these) ---
+# Environment variable files (often contain API keys, passwords)
+.env
+.env.*
+
+# SSL/TLS certificates and private keys
+*.pem
+*.key

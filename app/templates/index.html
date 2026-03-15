@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CI/CD Demo App</title>
+    <style>
+        /* ------------------------------------------------------------------ */
+        /* Reset & base                                                       */
+        /* ------------------------------------------------------------------ */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         Oxygen, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+            background: #f0f4f8;
+            color: #334155;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Header                                                             */
+        /* ------------------------------------------------------------------ */
+        header {
+            background: linear-gradient(135deg, #1e3a5f 0%, #0f766e 100%);
+            color: #fff;
+            padding: 2.5rem 1.5rem 2rem;
+            text-align: center;
+        }
+
+        header h1 {
+            font-size: 2.25rem;
+            font-weight: 700;
+            margin-bottom: 0.75rem;
+            letter-spacing: -0.5px;
+        }
+
+        .badges {
+            display: flex;
+            justify-content: center;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.3rem 0.85rem;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.25px;
+        }
+
+        .badge-version {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .badge-env-development {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .badge-env-staging {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .badge-env-production {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Main content                                                       */
+        /* ------------------------------------------------------------------ */
+        main {
+            flex: 1;
+            max-width: 960px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 1.25rem;
+            color: #1e3a5f;
+            position: relative;
+            padding-bottom: 0.5rem;
+        }
+
+        .section-title::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 50px;
+            height: 3px;
+            background: linear-gradient(90deg, #1e3a5f, #0f766e);
+            border-radius: 3px;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Feature cards grid                                                 */
+        /* ------------------------------------------------------------------ */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 1.25rem;
+            margin-top: 1rem;
+        }
+
+        .feature-card {
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 1.5rem;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+        }
+
+        .feature-icon {
+            font-size: 2rem;
+            line-height: 1;
+        }
+
+        .feature-card h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #1e3a5f;
+        }
+
+        .feature-card p {
+            font-size: 0.9rem;
+            line-height: 1.55;
+            color: #64748b;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* API info section                                                   */
+        /* ------------------------------------------------------------------ */
+        .api-section {
+            margin-top: 2.5rem;
+        }
+
+        .api-list {
+            list-style: none;
+            margin-top: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .api-list li {
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 0.85rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .method {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Footer                                                             */
+        /* ------------------------------------------------------------------ */
+        footer {
+            background: #1e293b;
+            color: #94a3b8;
+            text-align: center;
+            padding: 1.25rem 1rem;
+            font-size: 0.8rem;
+        }
+
+        footer span {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            color: #cbd5e1;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Responsive                                                         */
+        /* ------------------------------------------------------------------ */
+        @media (max-width: 600px) {
+            header h1 { font-size: 1.6rem; }
+            .features-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ============================================================== -->
+    <!-- Header                                                         -->
+    <!-- ============================================================== -->
+    <header>
+        <h1>CI/CD Demo App</h1>
+        <div class="badges">
+            <span class="badge badge-version">v{{ version }}</span>
+            {% if environment == "production" %}
+                <span class="badge badge-env-production">{{ environment }}</span>
+            {% elif environment == "staging" %}
+                <span class="badge badge-env-staging">{{ environment }}</span>
+            {% else %}
+                <span class="badge badge-env-development">{{ environment }}</span>
+            {% endif %}
+        </div>
+    </header>
+
+    <!-- ============================================================== -->
+    <!-- Main content                                                   -->
+    <!-- ============================================================== -->
+    <main>
+        <!-- Features ------------------------------------------------- -->
+        <h2 class="section-title">Features</h2>
+        <div class="features-grid">
+            {% for feature in features %}
+            <div class="feature-card">
+                <div class="feature-icon">{{ feature.icon | safe }}</div>
+                <h3>{{ feature.name }}</h3>
+                <p>{{ feature.description }}</p>
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- API Endpoints -------------------------------------------- -->
+        <div class="api-section">
+            <h2 class="section-title">API Endpoints</h2>
+            <ul class="api-list">
+                <li><span class="method">GET</span> /api/health</li>
+                <li><span class="method">GET</span> /api/version</li>
+                <li><span class="method">GET</span> /api/items</li>
+                <li><span class="method">GET</span> /api/items/&lt;id&gt;</li>
+            </ul>
+        </div>
+    </main>
+
+    <!-- ============================================================== -->
+    <!-- Footer                                                         -->
+    <!-- ============================================================== -->
+    <footer>
+        Build SHA: <span>{{ build_sha }}</span>
+    </footer>
+
+</body>
+</html>

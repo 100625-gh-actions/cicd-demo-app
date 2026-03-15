@@ -1,0 +1,315 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  Rollback Workflow — Manual Emergency Rollback                              ║
+# ║                                                                             ║
+# ║  WHAT:  This workflow allows operators to manually roll back to a           ║
+# ║         previous version of the application. It deploys a specific          ║
+# ║         Docker image tag to the chosen environment (staging or production). ║
+# ║                                                                             ║
+# ║  WHEN:  Triggered MANUALLY via workflow_dispatch (the "Run workflow"        ║
+# ║         button in the Actions tab). Requires the operator to specify:       ║
+# ║           - The version to roll back to (e.g., v1.0.0)                     ║
+# ║           - The target environment (staging or production)                  ║
+# ║           - The reason for the rollback                                     ║
+# ║                                                                             ║
+# ║  WHY:   Things break in production. When they do, you need a fast,         ║
+# ║         reliable way to get back to a known-good version. Rollbacks        ║
+# ║         should be:                                                          ║
+# ║           1. FAST — minutes, not hours                                      ║
+# ║           2. SIMPLE — one button click, not a complex process              ║
+# ║           3. AUDITABLE — who rolled back, when, and why?                   ║
+# ║           4. SAFE — validate the target version exists first               ║
+# ║                                                                             ║
+# ║  WHAT STUDENTS SHOULD OBSERVE:                                              ║
+# ║    1. Go to Actions tab → "Rollback" workflow → "Run workflow"             ║
+# ║    2. Fill in the version, environment, and reason                         ║
+# ║    3. Watch the validation step check that the image exists                ║
+# ║    4. If valid, the deployment proceeds; if not, it fails fast             ║
+# ║    5. A GitHub annotation records the rollback reason                      ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: Rollback
+
+# ──────────────────────────────────────────────────────────────
+# TRIGGER: Manual dispatch with required inputs
+# ──────────────────────────────────────────────────────────────
+# workflow_dispatch creates a "Run workflow" button in the GitHub
+# Actions UI. The `inputs` section defines the form fields that
+# the operator must fill in before triggering the workflow.
+#
+# TEACHING NOTE: This is how you create "push-button operations"
+# in GitHub Actions. Other use cases:
+#   - Manual database migrations
+#   - Cache clearing
+#   - Certificate rotation
+#   - Feature flag toggling
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to rollback to (e.g., v1.0.0 or sha-abc1234)'
+        required: true
+        type: string
+        # TEACHING NOTE: The version must match a Docker image tag
+        # in GHCR. You can find available tags in the repo's
+        # "Packages" tab under the cicd-demo-app container image.
+
+      environment:
+        description: 'Target environment for rollback'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+        # TEACHING NOTE: `type: choice` creates a dropdown menu
+        # in the UI. This prevents typos and ensures only valid
+        # environments are selected.
+
+      reason:
+        description: 'Reason for rollback (will be logged for audit)'
+        required: true
+        type: string
+        # TEACHING NOTE: Always require a reason for manual
+        # operations. This creates an audit trail that answers
+        # "why was this done?" when reviewing incident timelines.
+
+# ──────────────────────────────────────────────────────────────
+# CONCURRENCY: Prevent parallel rollbacks/deployments
+# ──────────────────────────────────────────────────────────────
+# We use the environment name in the concurrency group so that:
+#   - A staging rollback doesn't block a production rollback
+#   - But two staging rollbacks can't run simultaneously
+#
+# TEACHING NOTE: Notice this uses the same concurrency group names
+# as the deploy workflows (deploy-staging, deploy-production).
+# This means a rollback will wait for any in-progress deployment
+# to finish — you can't deploy and rollback at the same time!
+concurrency:
+  group: deploy-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+# ──────────────────────────────────────────────────────────────
+# PERMISSIONS
+# ──────────────────────────────────────────────────────────────
+permissions:
+  contents: read       # Read repo
+  packages: read       # Check if Docker image exists in GHCR
+  actions: write       # Create annotations
+
+jobs:
+  # ════════════════════════════════════════════════════════════
+  # JOB 1: VALIDATE — Check That the Target Version Exists
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: Before attempting a rollback, verify that the
+  # specified Docker image tag actually exists in GHCR. This
+  # prevents wasting time SSH-ing into the EC2 only to have
+  # `docker pull` fail.
+  #
+  # TEACHING NOTE: This is a "fail fast" pattern. We validate
+  # inputs before doing any real work. If the version doesn't
+  # exist, we stop immediately with a clear error message.
+  validate:
+    name: Validate Rollback Version
+    runs-on: ubuntu-latest
+    steps:
+      # ────────────────────────────────────────────────────────
+      # Step: Log the rollback request
+      # ────────────────────────────────────────────────────────
+      # Create a clear record of what was requested and by whom.
+      # This is critical for incident post-mortems.
+      - name: Log rollback request
+        run: |
+          echo "╔══════════════════════════════════════════╗"
+          echo "║  ROLLBACK REQUEST                        ║"
+          echo "╠══════════════════════════════════════════╣"
+          echo "║  Version:     ${{ github.event.inputs.version }}"
+          echo "║  Environment: ${{ github.event.inputs.environment }}"
+          echo "║  Reason:      ${{ github.event.inputs.reason }}"
+          echo "║  Requested by: ${{ github.actor }}"
+          echo "║  Time:        $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "╚══════════════════════════════════════════╝"
+
+      # ────────────────────────────────────────────────────────
+      # Step: Login to GHCR to check image availability
+      # ────────────────────────────────────────────────────────
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      # ────────────────────────────────────────────────────────
+      # Step: Verify the Docker image exists
+      # ────────────────────────────────────────────────────────
+      # We use `docker manifest inspect` to check if the image
+      # tag exists WITHOUT downloading the entire image.
+      # This is much faster than `docker pull`.
+      #
+      # TEACHING NOTE: `docker manifest inspect` queries the
+      # registry's metadata API. It's like doing a HEAD request
+      # to check if a URL exists before downloading the file.
+      - name: Verify Docker image exists in GHCR
+        run: |
+          IMAGE="ghcr.io/100625-gh-actions/cicd-demo-app:${{ github.event.inputs.version }}"
+
+          echo "Checking if image exists: ${IMAGE}"
+
+          if docker manifest inspect "${IMAGE}" > /dev/null 2>&1; then
+            echo "Image found! Rollback version is valid."
+            echo "Image: ${IMAGE}"
+          else
+            echo "ERROR: Image NOT found in GHCR!"
+            echo "The version '${{ github.event.inputs.version }}' does not exist."
+            echo ""
+            echo "Available tags can be found at:"
+            echo "  https://github.com/orgs/100625-gh-actions/packages/container/cicd-demo-app"
+            echo ""
+            echo "Common tag formats:"
+            echo "  - v1.0.0     (release version)"
+            echo "  - sha-abc1234 (commit SHA)"
+            echo "  - latest     (most recent build)"
+            exit 1
+          fi
+
+  # ════════════════════════════════════════════════════════════
+  # JOB 2: ROLLBACK — Deploy the Specified Version
+  # ════════════════════════════════════════════════════════════
+  # PURPOSE: SSH into the target environment's EC2 instance and
+  # deploy the specified version. This follows the same pattern
+  # as regular deployments but with a specific version tag.
+  #
+  # TEACHING NOTE: Notice that rollback is just "deploy a specific
+  # version." There's nothing special about it — we pull an older
+  # image and run it. This works because Docker images are
+  # immutable: v1.0.0 today is the same as v1.0.0 from last month.
+  rollback:
+    name: Rollback ${{ github.event.inputs.environment }}
+    needs: [validate]
+    runs-on: ubuntu-latest
+
+    # Use the appropriate GitHub Environment based on user input
+    # TEACHING NOTE: Dynamic environment selection!
+    # If the operator chose "production", this job will be
+    # subject to production's environment protection rules
+    # (manual approval, etc.)
+    environment:
+      name: ${{ github.event.inputs.environment }}
+
+    steps:
+      # ────────────────────────────────────────────────────────
+      # Step: Create an annotation for the rollback
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: Annotations appear as notices in the
+      # workflow run UI. They're useful for highlighting
+      # important information that should be immediately visible.
+      - name: Annotate rollback
+        run: |
+          echo "::warning::ROLLBACK in progress! Rolling ${{ github.event.inputs.environment }} back to ${{ github.event.inputs.version }}. Reason: ${{ github.event.inputs.reason }}"
+
+      # ────────────────────────────────────────────────────────
+      # Step: Determine the target host based on environment
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: We use environment-specific secrets here.
+      # When `environment: staging` is set, ${{ secrets.STAGING_HOST }}
+      # and ${{ secrets.PRODUCTION_HOST }} come from the environment's
+      # secret store. The SSH_PRIVATE_KEY can be shared across
+      # environments or be environment-specific.
+      - name: Deploy rollback version via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          # Select the correct host based on the chosen environment
+          host: ${{ github.event.inputs.environment == 'production' && secrets.PRODUCTION_HOST || secrets.STAGING_HOST }}
+          username: ec2-user
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "╔══════════════════════════════════════════════╗"
+            echo "║  EXECUTING ROLLBACK                          ║"
+            echo "╠══════════════════════════════════════════════╣"
+            echo "║  Target Version: ${{ github.event.inputs.version }}"
+            echo "║  Environment:    ${{ github.event.inputs.environment }}"
+            echo "║  Reason:         ${{ github.event.inputs.reason }}"
+            echo "║  Operator:       ${{ github.actor }}"
+            echo "║  Time:           $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "╚══════════════════════════════════════════════╝"
+
+            # Login to GHCR
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Pull the specific version we're rolling back to
+            echo "Pulling rollback image..."
+            docker pull ghcr.io/100625-gh-actions/cicd-demo-app:${{ github.event.inputs.version }}
+
+            # Record what version was running before the rollback
+            # (useful for incident reports)
+            PREVIOUS_VERSION=$(docker inspect --format='{{index .Config.Env}}' cicd-demo-app 2>/dev/null | grep -o 'APP_VERSION=[^ ]*' || echo "unknown")
+            echo "Previous version: ${PREVIOUS_VERSION}"
+
+            # Stop and remove the current container
+            docker stop cicd-demo-app || true
+            docker rm cicd-demo-app || true
+
+            # Start the rollback version
+            docker run -d \
+              --name cicd-demo-app \
+              --restart unless-stopped \
+              -p 5000:5000 \
+              -e APP_VERSION=${{ github.event.inputs.version }} \
+              -e ENVIRONMENT=${{ github.event.inputs.environment }} \
+              -e ROLLBACK=true \
+              -e ROLLBACK_REASON="${{ github.event.inputs.reason }}" \
+              ghcr.io/100625-gh-actions/cicd-demo-app:${{ github.event.inputs.version }}
+
+            # Clean up unused images
+            docker image prune -f
+
+            echo ""
+            echo "Rollback complete!"
+            echo "Previous: ${PREVIOUS_VERSION}"
+            echo "Current:  APP_VERSION=${{ github.event.inputs.version }}"
+
+      # ────────────────────────────────────────────────────────
+      # Step: Verify the rollback worked
+      # ────────────────────────────────────────────────────────
+      - name: Verify rollback deployment
+        run: |
+          TARGET_HOST="${{ github.event.inputs.environment == 'production' && secrets.PRODUCTION_HOST || secrets.STAGING_HOST }}"
+
+          echo "Waiting for rolled-back application to start..."
+          sleep 15
+
+          echo "Checking health endpoint..."
+          RESPONSE=$(curl -sf \
+            --retry 5 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            "http://${TARGET_HOST}:5000/api/health")
+
+          echo "Health check response:"
+          echo "$RESPONSE" | python3 -m json.tool
+
+          echo "$RESPONSE" | grep -q "${{ github.event.inputs.version }}" && \
+            echo "Rollback verified! Running version: ${{ github.event.inputs.version }}" || \
+            echo "WARNING: Version mismatch — manual verification recommended."
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+
+      # ────────────────────────────────────────────────────────
+      # Step: Post rollback summary
+      # ────────────────────────────────────────────────────────
+      # TEACHING NOTE: Always leave a clear record of what happened.
+      # In an incident, this information is invaluable.
+      - name: Rollback summary
+        run: |
+          echo "╔══════════════════════════════════════════════════╗"
+          echo "║  ROLLBACK COMPLETE                               ║"
+          echo "╠══════════════════════════════════════════════════╣"
+          echo "║  Status:      SUCCESS                            ║"
+          echo "║  Version:     ${{ github.event.inputs.version }}"
+          echo "║  Environment: ${{ github.event.inputs.environment }}"
+          echo "║  Reason:      ${{ github.event.inputs.reason }}"
+          echo "║  Operator:    ${{ github.actor }}"
+          echo "║  Time:        $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "╚══════════════════════════════════════════════════╝"
+          echo ""
+          echo "NEXT STEPS:"
+          echo "  1. Verify the application manually"
+          echo "  2. Investigate the root cause of the issue"
+          echo "  3. Create a fix PR and re-deploy through the normal pipeline"
+          echo "  4. Document the incident"

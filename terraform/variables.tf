@@ -35,9 +35,9 @@ variable "project_name" {
 # -----------------------------------------------------------------------------
 
 variable "instance_type" {
-  description = "EC2 instance type. t2.micro is free-tier eligible (750 hours/month for 12 months)."
+  description = "EC2 instance type. t3.micro is broadly free-tier eligible on newer AWS accounts and works in this demo account."
   type        = string
-  default     = "t2.micro"
+  default     = "t3.micro"
 }
 
 variable "ssh_key_name" {
